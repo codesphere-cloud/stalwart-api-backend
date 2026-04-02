@@ -1,0 +1,54 @@
+# CI Pipeline Example — Mattermost Landscape
+# Copy this file to config/ci.yml and customize it for your service.
+#
+# Full schema reference: .github/instructions/CI.instructions.md
+#
+# This file defines the landscape for the Mattermost provider.
+# The CI profile name (filename) must match backend.landscape.ciProfile
+# in provider.yml. E.g., if ciProfile is "production", this file should
+# be named ci.production.yml (or ci.yml for the default profile).
+
+schemaVersion: v0.2
+
+# 1. PREPARE: Install dependencies and build assets on the shared filesystem
+prepare:
+  steps:
+    - name: Download Mattermost
+      command: |
+        wget -O mattermost.tar.gz https://releases.mattermost.com/9.5.0/mattermost-9.5.0-linux-amd64.tar.gz
+        tar -xzf mattermost.tar.gz
+    - name: Install Runtime Dependencies
+      command: nix-env -iA nixpkgs.nginx
+
+# 2. RUN: Define the landscape services
+run:
+  # Codesphere Reactive — Mattermost application server
+  mattermost:
+    plan: 21
+    replicas: 1
+    healthEndpoint: http://localhost:8065/api/v4/system/ping
+    mountSubPath: mattermost-data
+    steps:
+      - name: Start Mattermost
+        command: ./mattermost/bin/mattermost server
+    env:
+      MM_SITENAME: ${{ workspace.env['SITE_NAME'] }}
+      MM_SERVICESETTINGS_SITEURL: ${{ workspace.env['SITE_URL'] }}
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: ${{ vault.DB_CONNECTION_STRING }}
+      MM_EMAILSETTINGS_SMTPPASSWORD: ${{ vault.ADMIN_PASSWORD }}
+    network:
+      ports:
+        - port: 8065
+          isPublic: false
+      paths:
+        - port: 8065
+          path: /
+
+  # Managed Service — PostgreSQL database
+  mattermost-db:
+    provider:
+      name: postgres
+      version: v1
+    plan:
+      id: 0
