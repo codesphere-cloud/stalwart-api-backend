@@ -28,10 +28,29 @@ fi
 
 PROVIDER_NAME=$(yq eval '.name' "$PROVIDER_CONFIG")
 PROVIDER_VERSION=$(yq eval '.version' "$PROVIDER_CONFIG")
-GIT_URL=$(yq eval '.backend.landscape.gitUrl' "$PROVIDER_CONFIG")
+
+# ── Detect backend type ────────────────────────────────────────────
+HAS_LANDSCAPE=$(yq eval '.backend.landscape.gitUrl // "absent"' "$PROVIDER_CONFIG" 2>/dev/null)
+HAS_REST=$(yq eval '.backend.rest.url // "absent"' "$PROVIDER_CONFIG" 2>/dev/null)
+
+if [[ "$HAS_LANDSCAPE" != "absent" ]]; then
+  BACKEND_TYPE="landscape"
+  GIT_URL="$HAS_LANDSCAPE"
+elif [[ "$HAS_REST" != "absent" ]]; then
+  BACKEND_TYPE="rest"
+  REST_URL="$HAS_REST"
+else
+  echo "ERROR: No backend configured. Specify backend.landscape or backend.rest in $PROVIDER_CONFIG"
+  exit 1
+fi
 
 echo "Provider:  $PROVIDER_NAME $PROVIDER_VERSION"
-echo "Git URL:   $GIT_URL"
+echo "Backend:   $BACKEND_TYPE"
+if [[ "$BACKEND_TYPE" == "landscape" ]]; then
+  echo "Git URL:   $GIT_URL"
+else
+  echo "REST URL:  $REST_URL"
+fi
 echo "API:       $API_ENDPOINT"
 
 # ── Determine scope ────────────────────────────────────────────────
@@ -44,14 +63,35 @@ else
 fi
 echo ""
 
-# ── Register using git URL approach ────────────────────────────────
+# ── Register provider ──────────────────────────────────────────────
 echo "Registering provider..."
 
-RESPONSE=$(curl -s -w "\n%{http_code}" \
-  -X POST "$API_ENDPOINT" \
-  -H "Authorization: Bearer $CODESPHERE_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"gitUrl": "'"$GIT_URL"'", "scope": '"$SCOPE_JSON"'}')
+if [[ "$BACKEND_TYPE" == "landscape" ]]; then
+  # Landscape backend — register using git URL
+  RESPONSE=$(curl -s -w "\n%{http_code}" \
+    -X POST "$API_ENDPOINT" \
+    -H "Authorization: Bearer $CODESPHERE_API_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"gitUrl": "'"$GIT_URL"'", "scope": '"$SCOPE_JSON"'}')
+else
+  # REST backend — register with full provider spec
+  PROVIDER_JSON=$(yq eval -o=json '.' "$PROVIDER_CONFIG")
+  PAYLOAD=$(echo "$PROVIDER_JSON" | python3 -c "
+import sys, json
+provider = json.load(sys.stdin)
+payload = {
+    'provider': provider,
+    'scope': $SCOPE_JSON
+}
+json.dump(payload, sys.stdout)
+")
+
+  RESPONSE=$(curl -s -w "\n%{http_code}" \
+    -X POST "$API_ENDPOINT" \
+    -H "Authorization: Bearer $CODESPHERE_API_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD")
+fi
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
 BODY=$(echo "$RESPONSE" | sed '$d')
