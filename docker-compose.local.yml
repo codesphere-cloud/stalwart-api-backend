@@ -3,11 +3,12 @@
 
 services:
   stalwart:
-    image: stalwartlabs/mail-server:v0.11
+    image: stalwartlabs/stalwart:v0.13.2
     container_name: stalwart-mail
     restart: unless-stopped
     ports:
       - "1443:443"     # HTTPS (admin UI + JMAP + webmail)
+      - "1080:8080"    # HTTP (admin UI, no TLS needed for local dev)
       - "1025:25"      # SMTP
       - "1587:587"     # SMTP submission
       - "1993:993"     # IMAPS

@@ -13,7 +13,6 @@
  * Required environment variables:
  *   STALWART_API_URL    — Stalwart admin API base URL (e.g. https://mail.example.com)
  *   STALWART_ADMIN_TOKEN — Bearer token or base64-encoded admin credentials for Stalwart API
- *   STALWART_MAIL_DOMAIN — Email domain (e.g. example.com)
  *   STALWART_IMAP_HOST   — Public IMAP hostname
  *   STALWART_SMTP_HOST   — Public SMTP hostname
  *
@@ -37,7 +36,7 @@ const AUTH_TOKEN = process.env.AUTH_TOKEN;
 // ── Stalwart configuration ────────────────────────────────────────
 const STALWART_API_URL = process.env.STALWART_API_URL;
 const STALWART_ADMIN_TOKEN = process.env.STALWART_ADMIN_TOKEN;
-const STALWART_MAIL_DOMAIN = process.env.STALWART_MAIL_DOMAIN;
+const STALWART_DEFAULT_DOMAIN = process.env.STALWART_MAIL_DOMAIN || '';
 const STALWART_IMAP_HOST = process.env.STALWART_IMAP_HOST;
 const STALWART_SMTP_HOST = process.env.STALWART_SMTP_HOST;
 const STALWART_IMAP_PORT = parseInt(process.env.STALWART_IMAP_PORT || '993', 10);
@@ -45,8 +44,8 @@ const STALWART_SMTP_PORT = parseInt(process.env.STALWART_SMTP_PORT || '587', 10)
 const STALWART_JMAP_URL = process.env.STALWART_JMAP_URL || (STALWART_API_URL ? `${STALWART_API_URL}/jmap` : '');
 const STALWART_WEBMAIL_URL = process.env.STALWART_WEBMAIL_URL || (STALWART_API_URL ? `${STALWART_API_URL}/login` : '');
 
-if (!STALWART_API_URL || !STALWART_ADMIN_TOKEN || !STALWART_MAIL_DOMAIN || !STALWART_IMAP_HOST || !STALWART_SMTP_HOST) {
-  console.error('Missing required environment variables. Need: STALWART_API_URL, STALWART_ADMIN_TOKEN, STALWART_MAIL_DOMAIN, STALWART_IMAP_HOST, STALWART_SMTP_HOST');
+if (!STALWART_API_URL || !STALWART_ADMIN_TOKEN || !STALWART_IMAP_HOST || !STALWART_SMTP_HOST) {
+  console.error('Missing required environment variables. Need: STALWART_API_URL, STALWART_ADMIN_TOKEN, STALWART_IMAP_HOST, STALWART_SMTP_HOST');
   process.exit(1);
 }
 
@@ -111,48 +110,126 @@ async function parseStalwartResponse(response) {
   return { ok: true, data: json.data };
 }
 
-// Ensure the mail domain exists as a Stalwart principal (idempotent)
-let domainEnsured = false;
-async function ensureDomain() {
-  if (domainEnsured) return;
+// Ensure a mail domain exists as a Stalwart principal (idempotent, per-domain cache)
+const ensuredDomains = new Set();
+async function ensureDomain(domain) {
+  if (ensuredDomains.has(domain)) return;
   const resp = await stalwartRequest('POST', '/api/principal', {
     type: 'domain',
-    name: STALWART_MAIL_DOMAIN,
-    description: `Mail domain ${STALWART_MAIL_DOMAIN}`,
+    name: domain,
+    description: `Mail domain ${domain}`,
   });
   const result = await parseStalwartResponse(resp);
-  // "alreadyExists" is fine — means domain was previously created
-  if (result.ok || result.error.startsWith('alreadyExists')) {
-    domainEnsured = true;
+  if (result.ok || (result.error && (result.error.includes('alreadyExists') || result.error.includes('AlreadyExists')))) {
+    ensuredDomains.add(domain);
+    console.log(`Domain ${domain} ensured.`);
   } else {
-    console.error(`Failed to ensure domain ${STALWART_MAIL_DOMAIN}:`, result.error);
+    console.error(`Failed to ensure domain ${domain}:`, result.error);
+    throw new Error(`Failed to ensure domain: ${result.error}`);
   }
 }
 
-function buildDetails(username, email) {
+// Fetch required DNS records from Stalwart for a domain
+async function fetchDnsRecords(domain) {
+  try {
+    const resp = await stalwartRequest('GET', `/api/dns/records/${encodeURIComponent(domain)}`);
+    const result = await parseStalwartResponse(resp);
+    if (!result.ok) {
+      console.error(`Failed to fetch DNS records for ${domain}:`, result.error);
+      return [];
+    }
+    return result.data || [];
+  } catch (err) {
+    console.error(`DNS record fetch error for ${domain}:`, err.message);
+    return [];
+  }
+}
+
+// Format DNS records into a human-readable string for details
+function formatDnsRecords(records) {
+  if (!records || records.length === 0) return 'No DNS records available';
+  return records
+    .map(r => `${r.type} ${r.name} ${r.content}`)
+    .join('\n');
+}
+
+// Fetch JMAP session details for a user (accountId, identityId, mailbox IDs)
+async function fetchJmapDetails(username, password) {
+  try {
+    const sessionResp = await fetch(`${STALWART_API_URL}/jmap/session`, {
+      headers: {
+        'Authorization': `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
+      },
+    });
+    if (!sessionResp.ok) return {};
+    const session = await sessionResp.json();
+    const accountId = session.primaryAccounts?.['urn:ietf:params:jmap:mail'];
+    if (!accountId) return {};
+
+    // Fetch identityId and mailbox IDs
+    const jmapResp = await fetch(`${STALWART_API_URL}/jmap/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail', 'urn:ietf:params:jmap:submission'],
+        methodCalls: [
+          ['Identity/get', { accountId }, '0'],
+          ['Mailbox/get', { accountId, properties: ['name', 'role'] }, '1'],
+        ],
+      }),
+    });
+    if (!jmapResp.ok) return { jmap_account_id: accountId };
+    const jmap = await jmapResp.json();
+
+    const identities = jmap.methodResponses?.[0]?.[1]?.list || [];
+    const mailboxes = jmap.methodResponses?.[1]?.[1]?.list || [];
+    const identityId = identities[0]?.id || '';
+    const draftsId = mailboxes.find(m => m.role === 'drafts')?.id || '';
+
+    return { jmap_account_id: accountId, jmap_identity_id: identityId, jmap_drafts_mailbox_id: draftsId };
+  } catch (err) {
+    console.error(`JMAP details fetch error for ${username}:`, err.message);
+    return {};
+  }
+}
+
+async function buildDetails(username, email, domain, password) {
+  const [dnsRecords, jmapDetails] = await Promise.all([
+    fetchDnsRecords(domain),
+    fetchJmapDetails(username, password),
+  ]);
   return {
     email,
     username,
+    mail_domain: domain,
     imap_host: STALWART_IMAP_HOST,
     imap_port: STALWART_IMAP_PORT,
     smtp_host: STALWART_SMTP_HOST,
     smtp_port: STALWART_SMTP_PORT,
     jmap_url: STALWART_JMAP_URL,
+    jmap_account_id: jmapDetails.jmap_account_id || '',
+    jmap_identity_id: jmapDetails.jmap_identity_id || '',
+    jmap_drafts_mailbox_id: jmapDetails.jmap_drafts_mailbox_id || '',
     webmail_url: STALWART_WEBMAIL_URL,
+    dns_records: formatDnsRecords(dnsRecords),
     ready: true,
   };
 }
 
 // ── POST / — Create Mailbox ───────────────────────────────────────
 app.post('/', async (req, res) => {
-  const { id, config, secrets } = req.body;
+  const { id, config, secrets, plan } = req.body;
 
   if (!id || !isValidUUID(id)) {
     return res.status(400).json({ error: 'Missing or invalid service id (UUID required)' });
   }
 
   if (services.has(id)) {
-    return res.status(409).json({ error: 'Service already exists' });
+    // Already tracked — idempotent success
+    return res.status(201).end();
   }
 
   const emailPrefix = config?.EMAIL_PREFIX;
@@ -165,13 +242,18 @@ app.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Missing MAIL_PASSWORD in secrets' });
   }
 
+  const mailDomain = (config?.MAIL_DOMAIN || STALWART_DEFAULT_DOMAIN || '').toLowerCase();
+  if (!mailDomain) {
+    return res.status(400).json({ error: 'Missing MAIL_DOMAIN in config and no default domain configured' });
+  }
+
   const username = emailPrefix.toLowerCase();
-  const email = `${username}@${STALWART_MAIL_DOMAIN}`;
+  const email = `${username}@${mailDomain}`;
   const displayName = config?.DISPLAY_NAME || username;
   const quotaMB = config?.QUOTA_MB || 0; // 0 = unlimited
 
   try {
-    await ensureDomain();
+    await ensureDomain(mailDomain);
 
     const response = await stalwartRequest('POST', '/api/principal', {
       type: 'individual',
@@ -192,16 +274,25 @@ app.post('/', async (req, res) => {
 
     const result = await parseStalwartResponse(response);
     if (!result.ok) {
-      console.error(`Stalwart create failed: ${result.error}`);
-      return res.status(502).json({ error: 'Failed to create mailbox on Stalwart', detail: result.error });
+      // If user already exists in Stalwart (e.g. after backend restart), adopt it
+      if (result.error && (result.error.includes('alreadyExists') || result.error.includes('AlreadyExists'))) {
+        console.log(`User ${username} already exists in Stalwart, adopting for service ${id}`);
+      } else {
+        console.error(`Stalwart create failed: ${result.error}`);
+        return res.status(502).json({ error: 'Failed to create mailbox on Stalwart', detail: result.error });
+      }
     }
+
+    const details = await buildDetails(username, email, mailDomain, password);
 
     services.set(id, {
       principalId: result.data,
       username,
       email,
+      mailDomain,
+      plan: plan || { id: 0, parameters: {} },
       config: config || {},
-      details: buildDetails(username, email),
+      details,
       createdAt: new Date().toISOString(),
     });
 
@@ -230,7 +321,7 @@ app.get('/', (req, res) => {
     const svc = services.get(id);
     if (svc) {
       result[id] = {
-        plan: {},
+        plan: svc.plan || { id: 0, parameters: {} },
         config: svc.config,
         details: svc.details,
       };
@@ -253,11 +344,16 @@ app.patch('/:id', async (req, res) => {
     return res.status(404).json({ error: 'Service not found' });
   }
 
-  const { config, secrets } = req.body;
+  const { config, secrets, plan } = req.body;
 
   // Stalwart PATCH uses an array of action objects:
   // [{"action": "set", "field": "...", "value": "..."}]
   const actions = [];
+
+  // Update plan if provided
+  if (plan) {
+    svc.plan = plan;
+  }
 
   if (config?.DISPLAY_NAME) {
     actions.push({ action: 'set', field: 'description', value: config.DISPLAY_NAME });
@@ -326,7 +422,7 @@ app.delete('/:id', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Stalwart mailbox backend listening on port ${PORT}`);
   console.log(`Stalwart API: ${STALWART_API_URL}`);
-  console.log(`Mail domain: ${STALWART_MAIL_DOMAIN}`);
+  console.log(`Mail domain: ${STALWART_DEFAULT_DOMAIN || '(per-service)'}`);
   if (AUTH_TOKEN) {
     console.log('Codesphere authentication enabled');
   } else {

@@ -1,5 +1,5 @@
 name: stalwart-mailbox
-version: v1
+version: v2
 author: Codesphere
 displayName: Stalwart Mailbox
 iconUrl: https://stalw.art/img/logo.svg
@@ -38,6 +38,10 @@ configSchema:
       type: string
       description: Local part of the email address (the part before @)
       x-update-constraint: immutable
+    MAIL_DOMAIN:
+      type: string
+      description: Email domain (e.g. example.com). Each domain is created automatically.
+      x-update-constraint: immutable
     DISPLAY_NAME:
       type: string
       description: Display name shown in email clients
@@ -59,6 +63,8 @@ detailsSchema:
       type: string
     username:
       type: string
+    mail_domain:
+      type: string
     imap_host:
       type: string
     imap_port:
@@ -69,7 +75,19 @@ detailsSchema:
       type: integer
     jmap_url:
       type: string
+    jmap_account_id:
+      type: string
+      description: JMAP account ID for API calls
+    jmap_identity_id:
+      type: string
+      description: JMAP identity ID for EmailSubmission
+    jmap_drafts_mailbox_id:
+      type: string
+      description: JMAP mailbox ID for Drafts folder
     webmail_url:
       type: string
+    dns_records:
+      type: string
+      description: DNS records to add to your domain for email delivery (SPF, DMARC, MX, DKIM)
     ready:
       type: boolean
