@@ -1,0 +1,25 @@
+schemaVersion: v0.2
+prepare:
+  steps:
+    - command: cd src/rest-backend && npm i
+test:
+  steps: []
+run:
+  ms-backend-stalwart:
+    plan: 101
+    replicas: 1
+    network:
+      ports:
+        - port: 3000
+          isPublic: false
+      paths: []
+    env:
+      STALWART_API_URL: https://stalwart.csa.codesphere-demo.com
+      STALWART_ADMIN_TOKEN: ${{ vault['stalwart-admin-token'] }}
+      STALWART_IMAP_HOST: stalwart.csa.codesphere-demo.com
+      STALWART_SMTP_HOST: stalwart.csa.codesphere-demo.com
+      STALWART_IMAP_PORT: 993
+      STALWART_SMTP_PORT: 587
+      PORT: 3000
+    steps:
+      - command: cd src/rest-backend && node server.js
