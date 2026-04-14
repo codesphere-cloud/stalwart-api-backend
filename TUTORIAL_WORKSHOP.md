@@ -133,14 +133,13 @@ https://github.com/codesphere-cloud/stalwart-provider
 
 ```
 stalwart-provider/
-├── server.js                       # ← Reference implementation (your starting point)
+├── server.js                       # ← Your starting point — implement the TODOs
 ├── package.json
 ├── ci.stalwart.yml                 # CI pipeline for the Stalwart Mail Server deployment
 ├── ci.stalwart-provider.yml        # CI pipeline for the REST provider backend
 ├── provider.yml                    # Service definition for the Codesphere marketplace
 ├── docker-compose.local.yml        # Local Stalwart for development (optional)
-└── guides/
-    └── TUTORIAL_WORKSHOP.md        # This file
+└── TUTORIAL_WORKSHOP.md            # This file
 ```
 
 ### Step 1.3 — Verify the Stalwart Instance
@@ -302,7 +301,7 @@ Codesphere POST /                    Your Backend                         Stalwa
 
 ### 3.3 — Key Implementation Details
 
-Here is what you need to implement, broken into logical pieces. The reference implementation in `server.js` is a working example — study it, then build your own version (or extend it).
+Here is what you need to implement, broken into logical pieces. The `server.js` file contains the scaffolding with TODO comments for each part — fill them in as you go. A complete reference solution is available on the `solution` branch.
 
 #### A. Stalwart API Helper
 
